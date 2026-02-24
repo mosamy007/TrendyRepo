@@ -1,8 +1,33 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Search, Star, GitFork, ExternalLink, TrendingUp, Calendar, Filter, FileText, ChevronDown, ChevronUp, AlertCircle } from 'lucide-react'
+import { Search, Star, GitFork, ExternalLink, TrendingUp, Calendar, Filter, FileText, ChevronDown, ChevronUp, AlertCircle, Key } from 'lucide-react'
 
 // Simple delay utility
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+
+// Cache utilities
+const getCache = (key) => {
+  try {
+    const cached = localStorage.getItem(`github-trends-${key}`)
+    if (!cached) return null
+    const { data, timestamp } = JSON.parse(cached)
+    // Cache expires after 5 minutes
+    if (Date.now() - timestamp > 5 * 60 * 1000) {
+      localStorage.removeItem(`github-trends-${key}`)
+      return null
+    }
+    return data
+  } catch {
+    return null
+  }
+}
+
+const setCache = (key, data) => {
+  try {
+    localStorage.setItem(`github-trends-${key}`, JSON.stringify({ data, timestamp: Date.now() }))
+  } catch {
+    // Ignore cache errors
+  }
+}
 
 function App() {
   const [repositories, setRepositories] = useState([])
@@ -14,17 +39,38 @@ function App() {
   const [languageFilter, setLanguageFilter] = useState('')
   const [timeRange, setTimeRange] = useState('daily')
   const [expandedRepo, setExpandedRepo] = useState(null)
+  const [githubToken, setGithubToken] = useState(import.meta.env.VITE_GITHUB_TOKEN || '')
+  const [showTokenInput, setShowTokenInput] = useState(false)
 
-  // Fetch README content for a repository with rate limit handling
+  // Save token to localStorage when changed
+  useEffect(() => {
+    if (githubToken) {
+      localStorage.setItem('github-token', githubToken)
+    } else {
+      localStorage.removeItem('github-token')
+    }
+  }, [githubToken])
+
+  // Get headers with optional auth token
+  const getHeaders = () => {
+    const headers = {
+      'Accept': 'application/vnd.github.v3+json'
+    }
+    if (githubToken) {
+      headers['Authorization'] = `token ${githubToken}`
+    }
+    return headers
+  }
   const fetchReadme = async (owner, repo) => {
+    // Check cache first
+    const cacheKey = `readme-${owner}-${repo}`
+    const cached = getCache(cacheKey)
+    if (cached) return cached
+    
     try {
       const response = await fetch(
         `https://api.github.com/repos/${owner}/${repo}/readme`,
-        {
-          headers: {
-            'Accept': 'application/vnd.github.v3+json'
-          }
-        }
+        { headers: getHeaders() }
       )
       
       if (response.status === 403 || response.status === 429) {
@@ -38,6 +84,7 @@ function App() {
       
       const data = await response.json()
       const decoded = atob(data.content.replace(/\n/g, ''))
+      setCache(cacheKey, decoded)
       return decoded
     } catch {
       return null
@@ -46,12 +93,15 @@ function App() {
 
   // Fetch repo info with rate limit handling
   const fetchRepoInfo = async (owner, repo) => {
+    // Check cache first
+    const cacheKey = `info-${owner}-${repo}`
+    const cached = getCache(cacheKey)
+    if (cached) return cached
+    
     try {
       const response = await fetch(
         `https://api.github.com/repos/${owner}/${repo}`,
-        {
-          headers: { 'Accept': 'application/vnd.github.v3+json' }
-        }
+        { headers: getHeaders() }
       )
       
       if (response.status === 403 || response.status === 429) {
@@ -63,7 +113,9 @@ function App() {
         return null
       }
       
-      return await response.json()
+      const data = await response.json()
+      setCache(cacheKey, data)
+      return data
     } catch {
       return null
     }
@@ -165,15 +217,14 @@ function App() {
       
       const response = await fetch(
         `https://api.github.com/search/repositories?q=${query}&sort=stars&order=desc&per_page=30`,
-        {
-          headers: {
-            'Accept': 'application/vnd.github.v3+json'
-          }
-        }
+        { headers: getHeaders() }
       )
       
       if (response.status === 403 || response.status === 429) {
         setRateLimited(true)
+        if (!githubToken) {
+          throw new Error('GitHub API rate limit exceeded. Add a token for 5000 requests/hour, or wait 1 minute.')
+        }
         throw new Error('GitHub API rate limit exceeded. Please wait a minute and try again.')
       }
       
@@ -252,15 +303,24 @@ function App() {
             </div>
             
             {/* Search Bar */}
-            <div className="relative w-full sm:w-96">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400 w-5 h-5" />
-              <input
-                type="text"
-                placeholder="Search repositories..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-10 pr-4 py-2 bg-slate-700 border border-slate-600 rounded-lg text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-              />
+            <div className="flex items-center gap-2">
+              <div className="relative w-full sm:w-64">
+                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400 w-5 h-5" />
+                <input
+                  type="text"
+                  placeholder="Search repositories..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2 bg-slate-700 border border-slate-600 rounded-lg text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                />
+              </div>
+              <button
+                onClick={() => setShowTokenInput(!showTokenInput)}
+                className={`p-2 rounded-lg transition-colors ${githubToken ? 'text-green-400 bg-green-500/10' : 'text-slate-400 hover:text-purple-400 hover:bg-purple-500/10'}`}
+                title={githubToken ? 'GitHub token set (5000 req/hr)' : 'Add GitHub token for 5000 req/hr'}
+              >
+                <Key className="w-5 h-5" />
+              </button>
             </div>
           </div>
         </div>
@@ -268,18 +328,64 @@ function App() {
 
       {/* Filters */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {/* Token Input */}
+        {showTokenInput && (
+          <div className="mb-4 bg-slate-800 border border-slate-700 rounded-lg p-4">
+            <label className="block text-sm font-medium text-slate-300 mb-2">
+              GitHub Personal Access Token (optional)
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="password"
+                placeholder="ghp_xxxxxxxxxxxx"
+                value={githubToken}
+                onChange={(e) => setGithubToken(e.target.value)}
+                className="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              />
+              <button
+                onClick={() => {
+                  setGithubToken('')
+                  setShowTokenInput(false)
+                }}
+                className="px-4 py-2 text-slate-400 hover:text-slate-200"
+              >
+                Clear
+              </button>
+            </div>
+            <p className="mt-2 text-xs text-slate-400">
+              Without token: 60 requests/hour. With token: 5000 requests/hour.
+              <a 
+                href="https://github.com/settings/tokens/new" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="text-purple-400 hover:text-purple-300 ml-1"
+              >
+                Create token →
+              </a>
+            </p>
+          </div>
+        )}
+
         {/* Rate Limit Warning */}
         {rateLimited && (
           <div className="mb-4 bg-amber-500/10 border border-amber-500/50 rounded-lg p-4 flex items-center gap-3">
             <AlertCircle className="w-5 h-5 text-amber-400 flex-shrink-0" />
-            <div>
+            <div className="flex-1">
               <p className="text-amber-400 font-medium">
-                GitHub API rate limit reached
+                GitHub API rate limit reached (60 req/hr without token)
               </p>
               <p className="text-amber-300/80 text-sm">
-                Showing basic info. Enhanced descriptions will load after rate limit resets (~1 minute).
+                {!githubToken ? 'Add a GitHub token above for 5000 requests/hour, or wait 1 minute.' : 'Please wait 1 minute for the rate limit to reset.'}
               </p>
             </div>
+            {!githubToken && (
+              <button
+                onClick={() => setShowTokenInput(true)}
+                className="px-3 py-1 bg-purple-500 text-white text-sm rounded-lg hover:bg-purple-600 transition-colors"
+              >
+                Add Token
+              </button>
+            )}
           </div>
         )}
 
