@@ -1,17 +1,21 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Search, Star, GitFork, ExternalLink, TrendingUp, Calendar, Filter, FileText, ChevronDown, ChevronUp } from 'lucide-react'
+import { Search, Star, GitFork, ExternalLink, TrendingUp, Calendar, Filter, FileText, ChevronDown, ChevronUp, AlertCircle } from 'lucide-react'
+
+// Simple delay utility
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms))
 
 function App() {
   const [repositories, setRepositories] = useState([])
   const [repoDetails, setRepoDetails] = useState({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [rateLimited, setRateLimited] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [languageFilter, setLanguageFilter] = useState('')
   const [timeRange, setTimeRange] = useState('daily')
   const [expandedRepo, setExpandedRepo] = useState(null)
 
-  // Fetch README content for a repository
+  // Fetch README content for a repository with rate limit handling
   const fetchReadme = async (owner, repo) => {
     try {
       const response = await fetch(
@@ -23,14 +27,43 @@ function App() {
         }
       )
       
+      if (response.status === 403 || response.status === 429) {
+        setRateLimited(true)
+        return null
+      }
+      
       if (!response.ok) {
         return null
       }
       
       const data = await response.json()
-      // Decode base64 content
       const decoded = atob(data.content.replace(/\n/g, ''))
       return decoded
+    } catch {
+      return null
+    }
+  }
+
+  // Fetch repo info with rate limit handling
+  const fetchRepoInfo = async (owner, repo) => {
+    try {
+      const response = await fetch(
+        `https://api.github.com/repos/${owner}/${repo}`,
+        {
+          headers: { 'Accept': 'application/vnd.github.v3+json' }
+        }
+      )
+      
+      if (response.status === 403 || response.status === 429) {
+        setRateLimited(true)
+        return null
+      }
+      
+      if (!response.ok) {
+        return null
+      }
+      
+      return await response.json()
     } catch {
       return null
     }
@@ -74,15 +107,15 @@ function App() {
     return desc || existingDescription || 'No description available'
   }
 
-  // Get topics as keywords for what the repo does
-  const fetchRepoDetails = async (owner, repo) => {
+  // Get repo details with sequential fetching to avoid rate limits
+  const fetchRepoDetailsWithDelay = async (owner, repo, delayMs = 0) => {
+    if (delayMs > 0) {
+      await delay(delayMs)
+    }
+    
     try {
-      const [readme, repoInfo] = await Promise.all([
-        fetchReadme(owner, repo),
-        fetch(`https://api.github.com/repos/${owner}/${repo}`, {
-          headers: { 'Accept': 'application/vnd.github.v3+json' }
-        }).then(r => r.ok ? r.json() : null)
-      ])
+      const readme = await fetchReadme(owner, repo)
+      const repoInfo = await fetchRepoInfo(owner, repo)
       
       const enhancedDesc = extractDescription(readme, repoInfo?.description)
       
@@ -103,6 +136,7 @@ function App() {
   const fetchTrendingRepos = useCallback(async () => {
     setLoading(true)
     setError(null)
+    setRateLimited(false)
     
     try {
       const date = new Date()
@@ -138,6 +172,11 @@ function App() {
         }
       )
       
+      if (response.status === 403 || response.status === 429) {
+        setRateLimited(true)
+        throw new Error('GitHub API rate limit exceeded. Please wait a minute and try again.')
+      }
+      
       if (!response.ok) {
         throw new Error('Failed to fetch repositories')
       }
@@ -146,14 +185,20 @@ function App() {
       const repos = data.items || []
       setRepositories(repos)
       
-      // Fetch enhanced details for each repo
+      // Fetch enhanced details sequentially with delays to avoid rate limits
       const details = {}
-      await Promise.all(
-        repos.slice(0, 12).map(async (repo) => {
-          const repoDetails = await fetchRepoDetails(repo.owner.login, repo.name)
-          details[repo.id] = repoDetails
-        })
-      )
+      const topRepos = repos.slice(0, 6) // Reduced to 6 to minimize API calls
+      
+      for (let i = 0; i < topRepos.length; i++) {
+        const repo = topRepos[i]
+        const repoDetail = await fetchRepoDetailsWithDelay(
+          repo.owner.login, 
+          repo.name, 
+          i * 100 // 100ms delay between each request
+        )
+        details[repo.id] = repoDetail
+      }
+      
       setRepoDetails(details)
       
     } catch (err) {
@@ -223,6 +268,21 @@ function App() {
 
       {/* Filters */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {/* Rate Limit Warning */}
+        {rateLimited && (
+          <div className="mb-4 bg-amber-500/10 border border-amber-500/50 rounded-lg p-4 flex items-center gap-3">
+            <AlertCircle className="w-5 h-5 text-amber-400 flex-shrink-0" />
+            <div>
+              <p className="text-amber-400 font-medium">
+                GitHub API rate limit reached
+              </p>
+              <p className="text-amber-300/80 text-sm">
+                Showing basic info. Enhanced descriptions will load after rate limit resets (~1 minute).
+              </p>
+            </div>
+          </div>
+        )}
+
         <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mb-6">
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
@@ -275,6 +335,7 @@ function App() {
         <div className="mb-4">
           <p className="text-slate-400 text-sm">
             Showing {filteredRepos.length} trending repositories
+            {rateLimited && ' (basic info only)'}
           </p>
         </div>
 
